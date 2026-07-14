@@ -1,0 +1,167 @@
+package com.example.camvisionpro
+
+import android.bluetooth.*
+import android.bluetooth.le.*
+import android.content.Context
+import android.util.Log
+import java.util.*
+import androidx.core.content.ContextCompat
+import android.Manifest
+import android.content.pm.PackageManager
+import android.os.Build
+import androidx.annotation.RequiresPermission
+import androidx.core.app.ActivityCompat
+
+class BleManager(
+    private val context: Context,
+    private val onUpdate: (mode: String, intensity: Int) -> Unit,
+    private val onShutter: () -> Unit,
+    private val onSave: () -> Unit
+
+) {
+    private val SERVICE_UUID = UUID.fromString("4fafc201-1fb5-459e-8fcc-c5c9c331914b")
+    private val CHARACTERISTIC_UUID = UUID.fromString("beb5483e-36e1-4688-b7f5-ea07361b26a8")
+
+    private var bluetoothGatt: BluetoothGatt? = null
+    private val bluetoothAdapter: BluetoothAdapter by lazy {
+        (context.getSystemService(Context.BLUETOOTH_SERVICE) as BluetoothManager).adapter
+    }
+
+
+    fun startScan() {
+        val hasPermission = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            ContextCompat.checkSelfPermission(context, Manifest.permission.BLUETOOTH_SCAN) == PackageManager.PERMISSION_GRANTED
+        } else {
+            ContextCompat.checkSelfPermission(context, Manifest.permission.BLUETOOTH) == PackageManager.PERMISSION_GRANTED
+        }
+
+        if (!hasPermission) {
+            Log.e("BleManager", "Missing Bluetooth scan permission")
+            return
+        }
+        if (!bluetoothAdapter.isEnabled) {
+            Log.e("BleManager", "Bluetooth is turned off")
+            return
+        }
+
+
+        val scanner = bluetoothAdapter.bluetoothLeScanner
+        if (scanner == null) {
+            Log.e("BleManager", "BluetoothLeScanner unavailable")
+            return
+        }
+
+        Log.d("BleManager", "Scan started, looking for CamStick...")
+        scanner.startScan(object : ScanCallback() {
+            @RequiresPermission(Manifest.permission.BLUETOOTH_SCAN)
+            override fun onScanResult(callbackType: Int, result: ScanResult) {
+                Log.d("BleManager", "Found device: ${result.device.name ?: "unnamed"}")
+                if (result.device.name == "CamStick") {
+                    scanner.stopScan(this)
+                    connect(result.device)
+                }
+
+                if (ActivityCompat.checkSelfPermission(
+                        context,
+                        Manifest.permission.BLUETOOTH_CONNECT
+                    ) != PackageManager.PERMISSION_GRANTED
+                ) {
+                    // TODO: Consider calling
+                    //    ActivityCompat#requestPermissions
+                    // here to request the missing permissions, and then overriding
+                    //   public void onRequestPermissionsResult(int requestCode, String[] permissions,
+                    //                                          int[] grantResults)
+                    // to handle the case where the user grants the permission. See the documentation
+                    // for ActivityCompat#requestPermissions for more details.
+                    return
+                }
+                if (result.device.name == "CamStick") {
+                    scanner.stopScan(this)
+                    connect(result.device)
+                }
+            }
+        })
+    }
+
+
+    private fun connect(device: BluetoothDevice) {
+        val hasPermission = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            ContextCompat.checkSelfPermission(context, Manifest.permission.BLUETOOTH_CONNECT) == PackageManager.PERMISSION_GRANTED
+        } else {
+            ContextCompat.checkSelfPermission(context, Manifest.permission.BLUETOOTH) == PackageManager.PERMISSION_GRANTED
+        }
+
+        if (!hasPermission) {
+            Log.e("BleManager", "Missing Bluetooth connect permission")
+            return
+        }
+
+        bluetoothGatt = device.connectGatt(context, false, gattCallback)
+    }
+
+    private val gattCallback = object : BluetoothGattCallback() {
+        @RequiresPermission(Manifest.permission.BLUETOOTH_CONNECT)
+        override fun onConnectionStateChange(gatt: BluetoothGatt, status: Int, newState: Int) {
+            if (newState == BluetoothProfile.STATE_CONNECTED) {
+                Log.d("BleManager", "Connected to ESP32")
+                gatt.requestMtu(512)
+            }
+        }
+
+        @RequiresPermission(Manifest.permission.BLUETOOTH_CONNECT)
+        override fun onMtuChanged(gatt: BluetoothGatt, mtu: Int, status: Int) {
+            Log.d("BleManager", "MTU changed to: $mtu")
+            gatt.discoverServices()
+        }
+
+        @RequiresPermission(Manifest.permission.BLUETOOTH_CONNECT)
+        override fun onServicesDiscovered(gatt: BluetoothGatt, status: Int) {
+            val characteristic = gatt.getService(SERVICE_UUID)
+                ?.getCharacteristic(CHARACTERISTIC_UUID) ?: return
+
+            gatt.setCharacteristicNotification(characteristic, true)
+            val descriptor = characteristic.getDescriptor(
+                UUID.fromString("00002902-0000-1000-8000-00805f9b34fb")
+            )
+            descriptor?.value = BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE
+            gatt.writeDescriptor(descriptor)
+        }
+
+        @RequiresPermission(Manifest.permission.BLUETOOTH_CONNECT)
+        override fun onCharacteristicChanged(
+            gatt: BluetoothGatt,
+            characteristic: BluetoothGattCharacteristic
+        ) {
+            val rawBytes = characteristic.value
+            Log.d("BleManager", "Raw byte count: ${rawBytes?.size ?: 0}")
+            val payload = String(rawBytes ?: ByteArray(0), Charsets.UTF_8)
+            Log.d("BleManager", "Received: $payload")
+            parseAndNotify(payload)
+        }
+    }
+
+    private fun parseAndNotify(payload: String) {
+        try {
+            if (payload.startsWith("shutter")) {
+                onShutter()
+                return
+            }
+            if (payload.startsWith("save")) {
+                onSave()
+                return
+            }
+            val parts = payload.split(",")
+            val mode = parts[0].split(":")[1]
+            val intensity = parts[1].split(":")[1].toInt()
+            onUpdate(mode, intensity)
+        } catch (e: Exception) {
+            Log.e("BleManager", "Failed to parse: $payload", e)
+        }
+    }
+
+    @RequiresPermission(Manifest.permission.BLUETOOTH_CONNECT)
+    fun disconnect() {
+        bluetoothGatt?.close()
+        bluetoothGatt = null
+    }
+}
