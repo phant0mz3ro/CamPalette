@@ -45,7 +45,12 @@ class MainActivity : AppCompatActivity() {
     // Holds the captured photo in memory so we can reprocess it repeatedly
     private var capturedMat: Mat? = null
     private var currentMode: String = "moody"
-    private var currentIntensity: Int = 50
+    private val modeIntensities = mutableMapOf(
+        "moody" to 50,
+        "colorful" to 50
+    )
+
+    private val availableModes = listOf("moody", "colorful")
 
     private lateinit var bleManager: BleManager
 
@@ -85,9 +90,15 @@ class MainActivity : AppCompatActivity() {
 
         bleManager = BleManager(
             context = this,
-            onUpdate = { mode, intensity ->
-                currentMode = mode
-                currentIntensity = intensity
+            onModeCycle = { direction ->
+                val currentIndex = availableModes.indexOf(currentMode)
+                val newIndex = ((currentIndex + direction) % availableModes.size + availableModes.size) % availableModes.size
+                currentMode = availableModes[newIndex]
+                runOnUiThread { reprocessAndShow() }
+            },
+            onIntensityDelta = { delta ->
+                val current = modeIntensities[currentMode] ?: 50
+                modeIntensities[currentMode] = (current + delta).coerceIn(0, 100)
                 runOnUiThread { reprocessAndShow() }
             },
             onShutter = {
@@ -203,11 +214,11 @@ class MainActivity : AppCompatActivity() {
     // called every time mode or intensity changes, no re-capture needed
     private fun reprocessAndShow() {
         val srcMat = capturedMat ?: return
-
+        val intensity = modeIntensities[currentMode] ?: 50
         CoroutineScope(Dispatchers.Default).launch {
             val resultMat = when (currentMode) {
-                "moody" -> applyMoody(srcMat, currentIntensity)
-                "colorful" -> applyColorful(srcMat, currentIntensity)
+                "moody" -> applyMoody(srcMat, intensity)
+                "colorful" -> applyColorful(srcMat, intensity)
                 else -> srcMat
             }
 

@@ -14,10 +14,10 @@ import androidx.core.app.ActivityCompat
 
 class BleManager(
     private val context: Context,
-    private val onUpdate: (mode: String, intensity: Int) -> Unit,
+    private val onModeCycle: (direction: Int) -> Unit,
+    private val onIntensityDelta: (delta: Int) -> Unit,
     private val onShutter: () -> Unit,
     private val onSave: () -> Unit
-
 ) {
     private val SERVICE_UUID = UUID.fromString("4fafc201-1fb5-459e-8fcc-c5c9c331914b")
     private val CHARACTERISTIC_UUID = UUID.fromString("beb5483e-36e1-4688-b7f5-ea07361b26a8")
@@ -142,18 +142,19 @@ class BleManager(
 
     private fun parseAndNotify(payload: String) {
         try {
-            if (payload.startsWith("shutter")) {
-                onShutter()
-                return
+            when {
+                payload.startsWith("shutter") -> onShutter()
+                payload.startsWith("save") -> onSave()
+                payload.startsWith("mode_cycle") -> {
+                    val direction = payload.split(":")[1].toInt()
+                    onModeCycle(direction)
+                }
+                payload.startsWith("intensity_delta") -> {
+                    val delta = payload.split(":")[1].toInt()
+                    onIntensityDelta(delta)
+                }
+                else -> Log.e("BleManager", "Unknown payload: $payload")
             }
-            if (payload.startsWith("save")) {
-                onSave()
-                return
-            }
-            val parts = payload.split(",")
-            val mode = parts[0].split(":")[1]
-            val intensity = parts[1].split(":")[1].toInt()
-            onUpdate(mode, intensity)
         } catch (e: Exception) {
             Log.e("BleManager", "Failed to parse: $payload", e)
         }

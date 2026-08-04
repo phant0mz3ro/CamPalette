@@ -19,56 +19,41 @@ bool deviceConnected = false;
 bool oldDeviceConnected = false;
 uint32_t value = 0;
 
-const int joyXPin = 12;
-const int joyYPin = 14;
-const int shutterButtonPin = 2;
-
-String modes[] = {"moody", "colorful"};
-int modeIndex = 0;
-int intensity = 50;
+const int joyXPin = 14;
+const int joyYPin = 2;
+const int shutterButtonPin = 12;
 
 unsigned long lastMoveTime = 0;
 bool lastButtonState = HIGH;
-
 unsigned long buttonPressStartTime = 0;
 bool longPressSent = false;
 
+void showIdleMessage() {
+    display.clearDisplay();
+    display.setTextSize(1);
+    display.setTextColor(SSD1306_WHITE);
+    display.setCursor(0, 25);
+    display.println("Not connected");
+    display.display();
+}
 
-void showMessage(String message) {
-    char text[30];
-    sprintf(text,"%s!",message);
-
+void showConnectedMessage() {
     display.clearDisplay();
     display.setTextSize(2);
     display.setTextColor(SSD1306_WHITE);
     display.setCursor(0, 20);
-    display.println(text);
-    display.display();
-    delay(2000); // brief confirmation, then switch to normal display
-    updateDisplay();
-}
-
-void updateDisplay() {
-    display.clearDisplay();
-    display.setTextSize(2);
-    display.setTextColor(SSD1306_WHITE);
-    display.setCursor(0, 0);
-    display.println(modes[modeIndex]);
-    display.setTextSize(1);
-    display.setCursor(0, 30);
-    display.print("Intensity: ");
-    display.println(intensity);
+    display.println("Connected!");
     display.display();
 }
 
 class ServerCallbacks : public BLEServerCallbacks {
-    void onConnect(BLEServer* pServer) { 
-        deviceConnected = true; 
-        showMessage("Connected");
-        }
+    void onConnect(BLEServer* pServer) {
+        deviceConnected = true;
+        showConnectedMessage();
+    }
     void onDisconnect(BLEServer* pServer) {
         deviceConnected = false;
-        showMessage("Disconnected");
+        showIdleMessage();
     }
 };
 
@@ -80,7 +65,7 @@ void setup() {
     digitalRead(shutterButtonPin); // throwaway read to let pin stabilize
     lastButtonState = digitalRead(shutterButtonPin) == LOW ? LOW : HIGH; // sync to actual current state
 
-    Wire.begin(13, 15); // SDA = GPIO13, SCL = GPIO15
+    Wire.begin(15, 13); // SDA = GPIO13, SCL = GPIO12
 
     // OLED init/
     
@@ -88,7 +73,7 @@ void setup() {
         Serial.println("OLED init failed");
     }
     display.clearDisplay();
-    updateDisplay();
+    showIdleMessage();
 
     // BLE init
     BLEDevice::init("CamStick");
@@ -116,8 +101,27 @@ void setup() {
 }
 
 
-void sendUpdate() {
-    String payload = "mode:" + modes[modeIndex] + ",intensity:" + String(intensity);
+void showSavedMessage() {
+    display.clearDisplay();
+    display.setTextSize(2);
+    display.setTextColor(SSD1306_WHITE);
+    display.setCursor(0, 20);
+    display.println("Saved!");
+    display.display();
+    delay(800);
+    display.clearDisplay();
+    display.display();
+}
+
+void sendModeCycle(int direction) {
+    String payload = "mode_cycle:" + String(direction);
+    pCharacteristic->setValue(payload.c_str());
+    pCharacteristic->notify();
+    Serial.println("Sent: " + payload);
+}
+
+void sendIntensityDelta(int delta) {
+    String payload = "intensity_delta:" + String(delta);
     pCharacteristic->setValue(payload.c_str());
     pCharacteristic->notify();
     Serial.println("Sent: " + payload);
@@ -141,63 +145,51 @@ void loop() {
         return;
     }
 
-    int xVal = analogRead(joyXPin); // 0-4095, center ~2048
+    int xVal = analogRead(joyXPin);
     int yVal = analogRead(joyYPin);
-
     unsigned long now = millis();
-    bool changed = false;
 
-    // Left/right cycles mode (with debounce delay so it doesn't spam)
+    // Left/right cycles preset (debounced)
     if (now - lastMoveTime > 400) {
         if (xVal < 1000) {
-            modeIndex = (modeIndex + 1) % 2;
-            changed = true;
+            sendModeCycle(1);
             lastMoveTime = now;
         } else if (xVal > 3000) {
-            modeIndex = (modeIndex - 1 + 2) % 2;
-            changed = true;
+            sendModeCycle(-1);
             lastMoveTime = now;
         }
     }
 
-    // Up/down adjusts intensity
+    // Up/down sends an intensity delta
     if (now - lastMoveTime > 150) {
-        if (yVal < 1000 && intensity < 100) {
-            intensity += 5;
-            changed = true;
+        if (yVal < 1000) {
+            sendIntensityDelta(5);
             lastMoveTime = now;
-        } else if (yVal > 3000 && intensity > 0) {
-            intensity -= 5;
-            changed = true;
+        } else if (yVal > 3000) {
+            sendIntensityDelta(-5);
             lastMoveTime = now;
         }
     }
 
-    if (changed) {
-        intensity = constrain(intensity, 0, 100);
-        updateDisplay();
-        sendUpdate();
-    }
-
+    // Shutter button — short press = capture/retake, long press = save
     bool shutterPressed = digitalRead(shutterButtonPin) == LOW;
 
     if (shutterPressed && lastButtonState == HIGH) {
-        // Button just went down — start timing
         buttonPressStartTime = now;
         longPressSent = false;
     }
 
     if (shutterPressed && !longPressSent && (now - buttonPressStartTime > 800)) {
-        // Held for 800ms+ — treat as long press
         sendSave();
+        showSavedMessage();
         longPressSent = true;
     }
 
     if (!shutterPressed && lastButtonState == LOW && !longPressSent) {
-        // Released quickly, before long-press threshold — treat as normal press
         sendShutter();
     }
 
     lastButtonState = shutterPressed ? LOW : HIGH;
+
     delay(50);
 }
