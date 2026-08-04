@@ -29,6 +29,7 @@ import java.util.Locale
 import android.content.ContentValues
 import android.provider.MediaStore
 import android.graphics.drawable.BitmapDrawable
+import androidx.annotation.RequiresPermission
 import com.google.android.material.snackbar.Snackbar
 
 class MainActivity : AppCompatActivity() {
@@ -54,18 +55,18 @@ class MainActivity : AppCompatActivity() {
 
     private lateinit var bleManager: BleManager
 
-    private val requestPermissionLauncher =
-        registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
-            if (granted) startCamera() else Log.e("MainActivity", "Camera permission denied")
-        }
-    private val bluetoothPermissionLauncher =
+    private val allPermissionsLauncher =
         registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { permissions ->
-            val allGranted = permissions.values.all { it }
-            if (allGranted) {
-                bleManager.startScan()
+            val cameraGranted = permissions[Manifest.permission.CAMERA] == true
+            val bluetoothGranted = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                permissions[Manifest.permission.BLUETOOTH_SCAN] == true &&
+                        permissions[Manifest.permission.BLUETOOTH_CONNECT] == true
             } else {
-                Log.e("MainActivity", "Bluetooth permissions denied")
+                permissions[Manifest.permission.BLUETOOTH] == true
             }
+
+            if (cameraGranted) startCamera()
+            if (bluetoothGranted) bleManager.startScan()
         }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -73,32 +74,20 @@ class MainActivity : AppCompatActivity() {
         binding = ActivityMainBinding.inflate(layoutInflater)
         setContentView(binding.root)
 
-        if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA)
-            == PackageManager.PERMISSION_GRANTED) {
-            startCamera()
-        } else {
-            requestPermissionLauncher.launch(Manifest.permission.CAMERA)
-        }
-
-        binding.captureButton.setOnClickListener {
-            handleShutterAction()
-        }
-
-        binding.downloadButton.setOnClickListener {
-            saveCurrentResult()
-        }
-
         bleManager = BleManager(
             context = this,
             onModeCycle = { direction ->
                 val currentIndex = availableModes.indexOf(currentMode)
                 val newIndex = ((currentIndex + direction) % availableModes.size + availableModes.size) % availableModes.size
                 currentMode = availableModes[newIndex]
+                val intensity = modeIntensities[currentMode] ?: 50
+                bleManager.sendDisplayUpdate("$currentMode\nIntensity: $intensity")
                 runOnUiThread { reprocessAndShow() }
             },
             onIntensityDelta = { delta ->
                 val current = modeIntensities[currentMode] ?: 50
                 modeIntensities[currentMode] = (current + delta).coerceIn(0, 100)
+                bleManager.sendDisplayUpdate("$currentMode\nIntensity: ${modeIntensities[currentMode]}")
                 runOnUiThread { reprocessAndShow() }
             },
             onShutter = {
@@ -110,23 +99,45 @@ class MainActivity : AppCompatActivity() {
                         saveCurrentResult()
                     }
                 }
+            },
+            onConnectionChanged = { connected ->
+                runOnUiThread {
+                    binding.pairButton.visibility = if (connected) View.GONE else View.VISIBLE
+                }
             }
         )
-        val permissionsToRequest = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-            arrayOf(
-                Manifest.permission.BLUETOOTH_SCAN,
-                Manifest.permission.BLUETOOTH_CONNECT,
-                Manifest.permission.ACCESS_FINE_LOCATION
-            )
-        } else {
-            arrayOf(
-                Manifest.permission.BLUETOOTH,
-                Manifest.permission.BLUETOOTH_ADMIN,
-                Manifest.permission.ACCESS_FINE_LOCATION
-            )
+
+        val permissionsToRequest = mutableListOf(Manifest.permission.CAMERA)
+        permissionsToRequest.addAll(
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                listOf(
+                    Manifest.permission.BLUETOOTH_SCAN,
+                    Manifest.permission.BLUETOOTH_CONNECT,
+                    Manifest.permission.ACCESS_FINE_LOCATION
+                )
+            } else {
+                listOf(
+                    Manifest.permission.BLUETOOTH,
+                    Manifest.permission.BLUETOOTH_ADMIN,
+                    Manifest.permission.ACCESS_FINE_LOCATION
+                )
+            }
+        )
+
+        allPermissionsLauncher.launch(permissionsToRequest.toTypedArray())
+
+
+        binding.captureButton.setOnClickListener {
+            handleShutterAction()
         }
 
-        bluetoothPermissionLauncher.launch(permissionsToRequest)
+        binding.downloadButton.setOnClickListener {
+            saveCurrentResult()
+        }
+
+        binding.pairButton.setOnClickListener {
+            bleManager.startScan()
+        }
         //bleManager.startScan()
     }
 
@@ -163,6 +174,7 @@ class MainActivity : AppCompatActivity() {
             binding.captureButton.text = "Capture"
             capturedMat?.release()
             capturedMat = null
+            bleManager.sendDisplayUpdate("Ready to shoot")
         } else {
             takePhoto()
         }
@@ -185,6 +197,7 @@ class MainActivity : AppCompatActivity() {
                     Log.e("MainActivity", "Photo capture failed", exc)
                 }
 
+                @RequiresPermission(Manifest.permission.BLUETOOTH_CONNECT)
                 override fun onImageSaved(output: ImageCapture.OutputFileResults) {
                     // Load once into memory, downscaled for fast live tuning
                     val bitmap = BitmapFactory.decodeFile(photoFile.absolutePath)
@@ -196,6 +209,8 @@ class MainActivity : AppCompatActivity() {
                     val rgbMat = Mat()
                     Imgproc.cvtColor(mat, rgbMat, Imgproc.COLOR_RGBA2RGB)
                     capturedMat = rgbMat
+                    val intensity = modeIntensities[currentMode] ?: 50
+                    bleManager.sendDisplayUpdate("$currentMode\nIntensity: $intensity")
 
                     runOnUiThread {
                         binding.previewView.visibility = View.GONE

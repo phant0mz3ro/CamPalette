@@ -17,7 +17,8 @@ class BleManager(
     private val onModeCycle: (direction: Int) -> Unit,
     private val onIntensityDelta: (delta: Int) -> Unit,
     private val onShutter: () -> Unit,
-    private val onSave: () -> Unit
+    private val onSave: () -> Unit,
+    private val onConnectionChanged: (connected: Boolean) -> Unit
 ) {
     private val SERVICE_UUID = UUID.fromString("4fafc201-1fb5-459e-8fcc-c5c9c331914b")
     private val CHARACTERISTIC_UUID = UUID.fromString("beb5483e-36e1-4688-b7f5-ea07361b26a8")
@@ -25,6 +26,25 @@ class BleManager(
     private var bluetoothGatt: BluetoothGatt? = null
     private val bluetoothAdapter: BluetoothAdapter by lazy {
         (context.getSystemService(Context.BLUETOOTH_SERVICE) as BluetoothManager).adapter
+    }
+
+    private val DISPLAY_CHARACTERISTIC_UUID = UUID.fromString("a1b2c3d4-1234-5678-9abc-def012345678")
+    private var displayCharacteristic: BluetoothGattCharacteristic? = null
+
+    @RequiresPermission(Manifest.permission.BLUETOOTH_CONNECT)
+    fun sendDisplayUpdate(text: String) {
+        val characteristic = displayCharacteristic ?: return
+        val gatt = bluetoothGatt ?: return
+        val data = text.toByteArray(Charsets.UTF_8)
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            gatt.writeCharacteristic(characteristic, data, BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT)
+        } else {
+            @Suppress("DEPRECATION")
+            characteristic.value = data
+            @Suppress("DEPRECATION")
+            gatt.writeCharacteristic(characteristic)
+        }
     }
 
 
@@ -102,9 +122,17 @@ class BleManager(
     private val gattCallback = object : BluetoothGattCallback() {
         @RequiresPermission(Manifest.permission.BLUETOOTH_CONNECT)
         override fun onConnectionStateChange(gatt: BluetoothGatt, status: Int, newState: Int) {
-            if (newState == BluetoothProfile.STATE_CONNECTED) {
-                Log.d("BleManager", "Connected to ESP32")
-                gatt.requestMtu(512)
+            when (newState) {
+                BluetoothProfile.STATE_CONNECTED -> {
+                    Log.d("BleManager", "Connected to ESP32")
+                    gatt.requestMtu(512)
+                    onConnectionChanged(true)
+                }
+                BluetoothProfile.STATE_DISCONNECTED -> {
+                    Log.d("BleManager", "Disconnected from ESP32")
+                    gatt.close()
+                    onConnectionChanged(false)
+                }
             }
         }
 
@@ -114,8 +142,11 @@ class BleManager(
             gatt.discoverServices()
         }
 
+
+
         @RequiresPermission(Manifest.permission.BLUETOOTH_CONNECT)
         override fun onServicesDiscovered(gatt: BluetoothGatt, status: Int) {
+            displayCharacteristic = gatt.getService(SERVICE_UUID)?.getCharacteristic(DISPLAY_CHARACTERISTIC_UUID)
             val characteristic = gatt.getService(SERVICE_UUID)
                 ?.getCharacteristic(CHARACTERISTIC_UUID) ?: return
 

@@ -28,6 +28,11 @@ bool lastButtonState = HIGH;
 unsigned long buttonPressStartTime = 0;
 bool longPressSent = false;
 
+#define DISPLAY_CHARACTERISTIC_UUID "a1b2c3d4-1234-5678-9abc-def012345678"
+
+BLECharacteristic* pDisplayCharacteristic = NULL;
+
+
 void showIdleMessage() {
     display.clearDisplay();
     display.setTextSize(1);
@@ -46,6 +51,15 @@ void showConnectedMessage() {
     display.display();
 }
 
+void showReceivedText(String text) {
+    display.clearDisplay();
+    display.setTextSize(1);
+    display.setTextColor(SSD1306_WHITE);
+    display.setCursor(0, 0);
+    display.println(text);
+    display.display();
+}
+
 class ServerCallbacks : public BLEServerCallbacks {
     void onConnect(BLEServer* pServer) {
         deviceConnected = true;
@@ -54,6 +68,13 @@ class ServerCallbacks : public BLEServerCallbacks {
     void onDisconnect(BLEServer* pServer) {
         deviceConnected = false;
         showIdleMessage();
+    }
+};
+
+class DisplayCallbacks : public BLECharacteristicCallbacks {
+    void onWrite(BLECharacteristic *pChar) {
+        String value = pChar->getValue().c_str();
+        showReceivedText(value);
     }
 };
 
@@ -84,11 +105,14 @@ void setup() {
     pCharacteristic = pService->createCharacteristic(
                       CHARACTERISTIC_UUID,
                       BLECharacteristic::PROPERTY_READ   |
-                      BLECharacteristic::PROPERTY_WRITE  |
-                      BLECharacteristic::PROPERTY_NOTIFY |
-                      BLECharacteristic::PROPERTY_INDICATE
+                      BLECharacteristic::PROPERTY_NOTIFY 
                     );
     pCharacteristic->addDescriptor(new BLE2902());
+    pDisplayCharacteristic = pService->createCharacteristic(
+        DISPLAY_CHARACTERISTIC_UUID,
+        BLECharacteristic::PROPERTY_WRITE
+    );
+    pDisplayCharacteristic->setCallbacks(new DisplayCallbacks());
     pService->start();
 
     BLEAdvertising *pAdvertising = BLEDevice::getAdvertising();
