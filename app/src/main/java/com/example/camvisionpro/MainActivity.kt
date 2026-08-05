@@ -40,6 +40,16 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    // Menu state
+    private enum class MenuMode { BROWSING_PRESETS, TUNING_PARAMETERS }
+    private var menuMode = MenuMode.BROWSING_PRESETS
+
+    private val presetNames = listOf("moody", "colorful")
+    private var highlightedPresetIndex = 0
+
+    private val parameterNames = listOf("curve", "saturation", "contrast", "warmth")
+    private var highlightedParameterIndex = 0
+
     private lateinit var binding: ActivityMainBinding
     private var imageCapture: ImageCapture? = null
 
@@ -52,7 +62,6 @@ class MainActivity : AppCompatActivity() {
     )
 
     private val availableModes = listOf("moody", "colorful")
-
     private lateinit var bleManager: BleManager
 
     private val allPermissionsLauncher =
@@ -77,19 +86,32 @@ class MainActivity : AppCompatActivity() {
         bleManager = BleManager(
             context = this,
             onModeCycle = { direction ->
-                val currentIndex = availableModes.indexOf(currentMode)
-                val newIndex = ((currentIndex + direction) % availableModes.size + availableModes.size) % availableModes.size
-                currentMode = availableModes[newIndex]
-                val intensity = modeIntensities[currentMode] ?: 50
-                bleManager.sendDisplayUpdate("$currentMode\nIntensity: $intensity")
-                runOnUiThread { reprocessAndShow() }
+                when (menuMode) {
+                    MenuMode.BROWSING_PRESETS -> {
+                        highlightedPresetIndex = (highlightedPresetIndex + direction + presetNames.size) % presetNames.size
+                        currentMode = presetNames[highlightedPresetIndex] // auto-apply on highlight, see point 2 below
+                        reprocessAndShow()
+                    }
+                    MenuMode.TUNING_PARAMETERS -> {
+                        highlightedParameterIndex = (highlightedParameterIndex + direction + parameterNames.size) % parameterNames.size
+                        syncSeekBarToHighlightedParameter()
+                    }
+                }
+                runOnUiThread { updateOledMenu() }
             },
             onIntensityDelta = { delta ->
-                val current = modeIntensities[currentMode] ?: 50
-                modeIntensities[currentMode] = (current + delta).coerceIn(0, 100)
-                bleManager.sendDisplayUpdate("$currentMode\nIntensity: ${modeIntensities[currentMode]}")
-                runOnUiThread { reprocessAndShow() }
+                when (menuMode) {
+                    MenuMode.BROWSING_PRESETS -> {
+                        highlightedPresetIndex = (highlightedPresetIndex - (delta / kotlin.math.abs(delta)) + presetNames.size) % presetNames.size
+                    }
+                    MenuMode.TUNING_PARAMETERS -> {
+                        highlightedParameterIndex = (highlightedParameterIndex - (delta / kotlin.math.abs(delta)) + parameterNames.size) % parameterNames.size
+                        syncSeekBarToHighlightedParameter()
+                    }
+                }
+                runOnUiThread { updateOledMenu() }
             },
+
             onShutter = {
                 runOnUiThread { handleShutterAction() }
             },
@@ -139,8 +161,53 @@ class MainActivity : AppCompatActivity() {
             bleManager.startScan()
         }
         //bleManager.startScan()
-    }
+        binding.selectButton.setOnClickListener {
+            if (menuMode == MenuMode.BROWSING_PRESETS) {
+                menuMode = MenuMode.TUNING_PARAMETERS
+                currentMode = presetNames[highlightedPresetIndex] // sync actual processing mode
+                highlightedParameterIndex = 0
+                syncSeekBarToHighlightedParameter()
+                updateOledMenu()
+                reprocessAndShow()
+            }
+        }
 
+        binding.exitButton.setOnClickListener {
+            if (menuMode == MenuMode.TUNING_PARAMETERS) {
+                menuMode = MenuMode.BROWSING_PRESETS
+                updateOledMenu()
+            }
+        }
+
+        binding.tempSeekBar.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+            override fun onProgressChanged(seekBar: SeekBar?, progress: Int, fromUser: Boolean) {
+                if (!fromUser || menuMode != MenuMode.TUNING_PARAMETERS) return
+                val params = presetParams[currentMode] ?: return
+                when (parameterNames[highlightedParameterIndex]) {
+                    "curve" -> params.curveStrength = 1.0 + (progress - 100) / 100.0
+                    "saturation" -> params.saturationMultiplier = progress / 100.0
+                    "contrast" -> params.contrastValue = progress - 100
+                    "warmth" -> params.warmthValue = progress - 100
+                }
+                updateOledMenu()
+                reprocessAndShow()
+            }
+            override fun onStartTrackingTouch(seekBar: SeekBar?) {}
+            override fun onStopTrackingTouch(seekBar: SeekBar?) {}
+        })
+    }
+    private fun syncSeekBarToHighlightedParameter() {
+        val params = presetParams[currentMode] ?: return
+        val paramName = parameterNames[highlightedParameterIndex]
+        val seekValue = when (paramName) {
+            "curve" -> ((params.curveStrength - 1.0) * 100 + 100).toInt()
+            "saturation" -> (params.saturationMultiplier * 100).toInt()
+            "contrast" -> params.contrastValue + 100
+            "warmth" -> params.warmthValue + 100
+            else -> 100
+        }
+        binding.tempSeekBar.progress = seekValue.coerceIn(0, 200)
+    }
     private fun startCamera() {
         val cameraProviderFuture = ProcessCameraProvider.getInstance(this)
 
@@ -165,7 +232,6 @@ class MainActivity : AppCompatActivity() {
             }
         }, ContextCompat.getMainExecutor(this))
     }
-
     private fun handleShutterAction() {
         if (binding.resultImageView.visibility == View.VISIBLE) {
             binding.resultImageView.visibility = View.GONE
@@ -179,8 +245,6 @@ class MainActivity : AppCompatActivity() {
             takePhoto()
         }
     }
-
-
     private fun takePhoto() {
         val imageCapture = imageCapture ?: return
 
@@ -209,9 +273,7 @@ class MainActivity : AppCompatActivity() {
                     val rgbMat = Mat()
                     Imgproc.cvtColor(mat, rgbMat, Imgproc.COLOR_RGBA2RGB)
                     capturedMat = rgbMat
-                    val intensity = modeIntensities[currentMode] ?: 50
-                    bleManager.sendDisplayUpdate("$currentMode\nIntensity: $intensity")
-
+                    updateOledMenu()
                     runOnUiThread {
                         binding.previewView.visibility = View.GONE
                         binding.resultImageView.visibility = View.VISIBLE
@@ -229,23 +291,108 @@ class MainActivity : AppCompatActivity() {
     // called every time mode or intensity changes, no re-capture needed
     private fun reprocessAndShow() {
         val srcMat = capturedMat ?: return
-        val intensity = modeIntensities[currentMode] ?: 50
+        val params = presetParams[currentMode] ?: ProcessingParams()
+
         CoroutineScope(Dispatchers.Default).launch {
-            val resultMat = when (currentMode) {
-                "moody" -> applyMoody(srcMat, intensity)
-                "colorful" -> applyColorful(srcMat, intensity)
-                else -> srcMat
-            }
-
-            val outputBitmap = Bitmap.createBitmap(
-                resultMat.cols(), resultMat.rows(), Bitmap.Config.ARGB_8888
-            )
+            val resultMat = applyProcessing(srcMat, params)
+            val outputBitmap = Bitmap.createBitmap(resultMat.cols(), resultMat.rows(), Bitmap.Config.ARGB_8888)
             Utils.matToBitmap(resultMat, outputBitmap)
-
             withContext(Dispatchers.Main) {
                 binding.resultImageView.setImageBitmap(outputBitmap)
             }
         }
+    }
+
+    data class ProcessingParams(
+        var curveStrength: Double = 1.0,
+        var saturationMultiplier: Double = 1.0,
+        var contrastValue: Int = 0,
+        var warmthValue: Int = 0
+    )
+
+    private val presetParams = mutableMapOf(
+        "moody" to ProcessingParams(curveStrength = 1.8, saturationMultiplier = 0.7),
+        "colorful" to ProcessingParams(saturationMultiplier = 1.6)
+    )
+
+    private fun updateOledMenu() {
+        val text = when (menuMode) {
+            MenuMode.BROWSING_PRESETS -> {
+                presetNames.mapIndexed { index, name ->
+                    if (index == highlightedPresetIndex) "> $name" else "  $name"
+                }.joinToString("\n")
+            }
+            MenuMode.TUNING_PARAMETERS -> {
+                val params = presetParams[presetNames[highlightedPresetIndex]] ?: ProcessingParams()
+                parameterNames.mapIndexed { index, name ->
+                    val value = when (name) {
+                        "curve" -> params.curveStrength
+                        "saturation" -> params.saturationMultiplier
+                        "contrast" -> params.contrastValue
+                        "warmth" -> params.warmthValue
+                        else -> 0
+                    }
+                    val label = "$name: $value"
+                    if (index == highlightedParameterIndex) "> $label" else "  $label"
+                }.joinToString("\n")
+            }
+        }
+        bleManager.sendDisplayUpdate(text)
+    }
+
+    private fun applyProcessing(src: Mat, params: ProcessingParams): Mat {
+        var result = src
+
+        // Tone curve (S-curve for shadows/highlights)
+        if (params.curveStrength != 1.0) {
+            val lut = Mat(1, 256, CvType.CV_8U)
+            for (i in 0..255) {
+                val x = i / 255.0
+                val curved = when {
+                    x < 0.5 -> 0.5 * Math.pow(2 * x, params.curveStrength)
+                    else -> 1 - 0.5 * Math.pow(2 * (1 - x), params.curveStrength)
+                }
+                lut.put(0, i, (curved * 255).toInt().coerceIn(0, 255).toDouble())
+            }
+            val toned = Mat()
+            Core.LUT(result, lut, toned)
+            result = toned
+        }
+
+        // Saturation
+        if (params.saturationMultiplier != 1.0) {
+            val hsv = Mat()
+            Imgproc.cvtColor(result, hsv, Imgproc.COLOR_RGB2HSV)
+            val channels = ArrayList<Mat>()
+            Core.split(hsv, channels)
+            Core.multiply(channels[1], Scalar(params.saturationMultiplier), channels[1])
+            Core.merge(channels, hsv)
+            val toned = Mat()
+            Imgproc.cvtColor(hsv, toned, Imgproc.COLOR_HSV2RGB)
+            result = toned
+        }
+
+        // Contrast
+        if (params.contrastValue != 0) {
+            val alpha = 1.0 + (params.contrastValue / 100.0)
+            val toned = Mat()
+            result.convertTo(toned, -1, alpha, 0.0)
+            result = toned
+        }
+
+        // Warmth (shift red up, blue down for warm; reverse for cool)
+        if (params.warmthValue != 0) {
+            val channels = ArrayList<Mat>()
+            Core.split(result, channels)
+            val shift = params.warmthValue / 2.0
+            Core.add(channels[0], Scalar(shift), channels[0])
+            Core.subtract(channels[2], Scalar(shift), channels[2])
+            val toned = Mat()
+            Core.merge(channels, toned)
+            result = toned
+        }
+
+        return result
     }
 
     // intensity: 0-100 from the slider, mapped to curve strength
@@ -276,7 +423,6 @@ class MainActivity : AppCompatActivity() {
         Imgproc.cvtColor(hsv, result, Imgproc.COLOR_HSV2RGB)
         return result
     }
-
     // intensity: 0-100 from the slider, boosts saturation instead of reducing it
     private fun applyColorful(src: Mat, intensity: Int): Mat {
         val hsv = Mat()
