@@ -1,0 +1,66 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout
+    xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:orientation="vertical"
+    android:padding="16dp">
+
+    <Spinner
+        android:id="@+id/presetSpinner"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content" />
+
+    <EditText
+        android:id="@+id/nameInput"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:hint="Preset name" />
+
+    <EditText
+        android:id="@+id/curveInput"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:hint="Curve strength (e.g. 1.8)"
+        android:inputType="numberDecimal" />
+
+    <EditText
+        android:id="@+id/saturationInput"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:hint="Saturation (e.g. 0.7)"
+        android:inputType="numberDecimal" />
+
+    <EditText
+        android:id="@+id/contrastInput"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:hint="Contrast (e.g. 20)"
+        android:inputType="numberSigned" />
+
+    <EditText
+        android:id="@+id/warmthInput"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:hint="Warmth (e.g. -15)"
+        android:inputType="numberSigned" />
+
+    <Button
+        android:id="@+id/saveAsExistingButton"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="Save to Selected Preset" />
+
+    <Button
+        android:id="@+id/saveAsNewButton"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="Save as New Preset" />
+
+    <Button
+        android:id="@+id/deleteButton"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="Delete Selected Preset" />
+
+</LinearLayout>

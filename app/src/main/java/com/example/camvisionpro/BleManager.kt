@@ -14,8 +14,11 @@ import androidx.core.app.ActivityCompat
 
 class BleManager(
     private val context: Context,
-    private val onModeCycle: (direction: Int) -> Unit,
-    private val onIntensityDelta: (delta: Int) -> Unit,
+    private val onNavUp: () -> Unit,
+    private val onNavDown: () -> Unit,
+    private val onSelect: () -> Unit,
+    private val onExit: () -> Unit,
+    private val onEncoderDelta: (delta: Int) -> Unit,
     private val onShutter: () -> Unit,
     private val onSave: () -> Unit,
     private val onConnectionChanged: (connected: Boolean) -> Unit
@@ -174,15 +177,15 @@ class BleManager(
     private fun parseAndNotify(payload: String) {
         try {
             when {
+                payload.startsWith("nav:up") -> onNavUp()
+                payload.startsWith("nav:down") -> onNavDown()
+                payload.startsWith("select") -> onSelect()
+                payload.startsWith("exit") -> onExit()
                 payload.startsWith("shutter") -> onShutter()
                 payload.startsWith("save") -> onSave()
-                payload.startsWith("mode_cycle") -> {
-                    val direction = payload.split(":")[1].toInt()
-                    onModeCycle(direction)
-                }
-                payload.startsWith("intensity_delta") -> {
+                payload.startsWith("encoder_delta") -> {
                     val delta = payload.split(":")[1].toInt()
-                    onIntensityDelta(delta)
+                    onEncoderDelta(delta)
                 }
                 else -> Log.e("BleManager", "Unknown payload: $payload")
             }

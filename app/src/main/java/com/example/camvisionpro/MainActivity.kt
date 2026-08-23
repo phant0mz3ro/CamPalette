@@ -27,6 +27,7 @@ import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Locale
 import android.content.ContentValues
+import android.content.Intent
 import android.provider.MediaStore
 import android.graphics.drawable.BitmapDrawable
 import androidx.annotation.RequiresPermission
@@ -40,11 +41,14 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    private lateinit var database: AppDatabase
+    private var presetList: MutableList<Preset> = mutableListOf()
+
     // Menu state
     private enum class MenuMode { BROWSING_PRESETS, TUNING_PARAMETERS }
     private var menuMode = MenuMode.BROWSING_PRESETS
 
-    private val presetNames = listOf("moody", "colorful")
+    private val presetNames = mutableListOf<String>()
     private var highlightedPresetIndex = 0
 
     private val parameterNames = listOf("curve", "saturation", "contrast", "warmth")
@@ -56,12 +60,6 @@ class MainActivity : AppCompatActivity() {
     // Holds the captured photo in memory so we can reprocess it repeatedly
     private var capturedMat: Mat? = null
     private var currentMode: String = "moody"
-    private val modeIntensities = mutableMapOf(
-        "moody" to 50,
-        "colorful" to 50
-    )
-
-    private val availableModes = listOf("moody", "colorful")
     private lateinit var bleManager: BleManager
 
     private val allPermissionsLauncher =
@@ -85,33 +83,21 @@ class MainActivity : AppCompatActivity() {
 
         bleManager = BleManager(
             context = this,
-            onModeCycle = { direction ->
-                when (menuMode) {
-                    MenuMode.BROWSING_PRESETS -> {
-                        highlightedPresetIndex = (highlightedPresetIndex + direction + presetNames.size) % presetNames.size
-                        currentMode = presetNames[highlightedPresetIndex] // auto-apply on highlight, see point 2 below
-                        reprocessAndShow()
-                    }
-                    MenuMode.TUNING_PARAMETERS -> {
-                        highlightedParameterIndex = (highlightedParameterIndex + direction + parameterNames.size) % parameterNames.size
-                        syncSeekBarToHighlightedParameter()
-                    }
-                }
-                runOnUiThread { updateOledMenu() }
+            onNavUp = {
+                runOnUiThread { handleNav(-1) }
             },
-            onIntensityDelta = { delta ->
-                when (menuMode) {
-                    MenuMode.BROWSING_PRESETS -> {
-                        highlightedPresetIndex = (highlightedPresetIndex - (delta / kotlin.math.abs(delta)) + presetNames.size) % presetNames.size
-                    }
-                    MenuMode.TUNING_PARAMETERS -> {
-                        highlightedParameterIndex = (highlightedParameterIndex - (delta / kotlin.math.abs(delta)) + parameterNames.size) % parameterNames.size
-                        syncSeekBarToHighlightedParameter()
-                    }
-                }
-                runOnUiThread { updateOledMenu() }
+            onNavDown = {
+                runOnUiThread { handleNav(1) }
             },
-
+            onSelect = {
+                runOnUiThread { handleSelect() }
+            },
+            onExit = {
+                runOnUiThread { handleExit() }
+            },
+            onEncoderDelta = { delta ->
+                runOnUiThread { handleEncoderDelta(delta) }
+            },
             onShutter = {
                 runOnUiThread { handleShutterAction() }
             },
@@ -128,7 +114,6 @@ class MainActivity : AppCompatActivity() {
                 }
             }
         )
-
         val permissionsToRequest = mutableListOf(Manifest.permission.CAMERA)
         permissionsToRequest.addAll(
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
@@ -148,6 +133,24 @@ class MainActivity : AppCompatActivity() {
 
         allPermissionsLauncher.launch(permissionsToRequest.toTypedArray())
 
+        database = AppDatabase.getInstance(this)
+
+        CoroutineScope(Dispatchers.IO).launch {
+            var saved = database.presetDao().getAll()
+            if (saved.isEmpty()) {
+                // First launch — seed default presets
+                database.presetDao().insert(Preset(name = "moody", curveStrength = 1.8, saturationMultiplier = 0.7, contrastValue = 0, warmthValue = 0))
+                database.presetDao().insert(Preset(name = "colorful", curveStrength = 1.0, saturationMultiplier = 1.6, contrastValue = 0, warmthValue = 0))
+                saved = database.presetDao().getAll()
+            }
+            presetList = saved.toMutableList()
+            withContext(Dispatchers.Main) {
+                presetNames.clear()
+                presetNames.addAll(presetList.map { it.name })
+                currentMode = presetNames.firstOrNull() ?: "moody"
+                updateOledMenu()
+            }
+        }
 
         binding.captureButton.setOnClickListener {
             handleShutterAction()
@@ -161,43 +164,38 @@ class MainActivity : AppCompatActivity() {
             bleManager.startScan()
         }
         //bleManager.startScan()
-        binding.selectButton.setOnClickListener {
-            if (menuMode == MenuMode.BROWSING_PRESETS) {
-                menuMode = MenuMode.TUNING_PARAMETERS
-                currentMode = presetNames[highlightedPresetIndex] // sync actual processing mode
-                highlightedParameterIndex = 0
-                syncSeekBarToHighlightedParameter()
-                updateOledMenu()
-                reprocessAndShow()
-            }
+
+
+        binding.presetManagerButton.setOnClickListener {
+            presetManagerLauncher.launch(Intent(this, PresetManagerActivity::class.java))
         }
 
-        binding.exitButton.setOnClickListener {
-            if (menuMode == MenuMode.TUNING_PARAMETERS) {
-                menuMode = MenuMode.BROWSING_PRESETS
-                updateOledMenu()
-            }
-        }
+    }
+    private val presetManagerLauncher = registerForActivityResult(
+        ActivityResultContracts.StartActivityForResult()
+    ) {
+        CoroutineScope(Dispatchers.IO).launch {
+            val saved = database.presetDao().getAll()
+            withContext(Dispatchers.Main) {
+                presetList = saved.toMutableList()
+                presetNames.clear()
+                presetNames.addAll(presetList.map { it.name })
 
-        binding.tempSeekBar.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
-            override fun onProgressChanged(seekBar: SeekBar?, progress: Int, fromUser: Boolean) {
-                if (!fromUser || menuMode != MenuMode.TUNING_PARAMETERS) return
-                val params = presetParams[currentMode] ?: return
-                when (parameterNames[highlightedParameterIndex]) {
-                    "curve" -> params.curveStrength = 1.0 + (progress - 100) / 100.0
-                    "saturation" -> params.saturationMultiplier = progress / 100.0
-                    "contrast" -> params.contrastValue = progress - 100
-                    "warmth" -> params.warmthValue = progress - 100
+                // Handle case where current preset was deleted (Test 4.1)
+                if (presetNames.isEmpty()) {
+                    currentMode = ""
+                } else if (!presetNames.contains(currentMode)) {
+                    currentMode = presetNames[0]
+                    highlightedPresetIndex = 0
                 }
+
                 updateOledMenu()
-                reprocessAndShow()
+                if (capturedMat != null) reprocessAndShow() // refresh live preview immediately
             }
-            override fun onStartTrackingTouch(seekBar: SeekBar?) {}
-            override fun onStopTrackingTouch(seekBar: SeekBar?) {}
-        })
+        }
     }
     private fun syncSeekBarToHighlightedParameter() {
-        val params = presetParams[currentMode] ?: return
+        val params = getParamsForPreset(currentMode) ?: return
         val paramName = parameterNames[highlightedParameterIndex]
         val seekValue = when (paramName) {
             "curve" -> ((params.curveStrength - 1.0) * 100 + 100).toInt()
@@ -206,7 +204,7 @@ class MainActivity : AppCompatActivity() {
             "warmth" -> params.warmthValue + 100
             else -> 100
         }
-        binding.tempSeekBar.progress = seekValue.coerceIn(0, 200)
+
     }
     private fun startCamera() {
         val cameraProviderFuture = ProcessCameraProvider.getInstance(this)
@@ -238,9 +236,10 @@ class MainActivity : AppCompatActivity() {
             binding.downloadButton.visibility = View.GONE
             binding.previewView.visibility = View.VISIBLE
             binding.captureButton.text = "Capture"
+            menuMode = MenuMode.BROWSING_PRESETS
+            bleManager.sendDisplayUpdate("Ready to shoot")
             capturedMat?.release()
             capturedMat = null
-            bleManager.sendDisplayUpdate("Ready to shoot")
         } else {
             takePhoto()
         }
@@ -278,8 +277,12 @@ class MainActivity : AppCompatActivity() {
                         binding.previewView.visibility = View.GONE
                         binding.resultImageView.visibility = View.VISIBLE
                         binding.downloadButton.visibility = View.VISIBLE
-                       // binding.controlsLayout.visibility = View.VISIBLE
                         binding.captureButton.text = "Retake"
+
+                        // Reset menu state on every new capture
+                        menuMode = MenuMode.BROWSING_PRESETS
+
+                        updateOledMenu()
                     }
                     reprocessAndShow()
                 }
@@ -287,11 +290,57 @@ class MainActivity : AppCompatActivity() {
         )
     }
 
+    private fun handleNav(direction: Int) {
+        when (menuMode) {
+            MenuMode.BROWSING_PRESETS -> {
+                if (presetNames.isEmpty()) return
+                highlightedPresetIndex = (highlightedPresetIndex + direction + presetNames.size) % presetNames.size
+                currentMode = presetNames[highlightedPresetIndex]
+                reprocessAndShow()
+            }
+            MenuMode.TUNING_PARAMETERS -> {
+                highlightedParameterIndex = (highlightedParameterIndex + direction + parameterNames.size) % parameterNames.size
+            }
+        }
+        updateOledMenu()
+    }
+
+    private fun handleSelect() {
+        if (menuMode == MenuMode.BROWSING_PRESETS && presetNames.isNotEmpty()) {
+            menuMode = MenuMode.TUNING_PARAMETERS
+            currentMode = presetNames[highlightedPresetIndex]
+            highlightedParameterIndex = 0
+            updateOledMenu()
+            reprocessAndShow()
+        }
+    }
+
+    private fun handleExit() {
+        if (menuMode == MenuMode.TUNING_PARAMETERS) {
+            menuMode = MenuMode.BROWSING_PRESETS
+            updateOledMenu()
+        }
+    }
+
+    private fun handleEncoderDelta(delta: Int) {
+        if (menuMode != MenuMode.TUNING_PARAMETERS) return
+        val preset = presetList.find { it.name == presetNames[highlightedPresetIndex] } ?: return
+
+        when (parameterNames[highlightedParameterIndex]) {
+            "curve" -> preset.curveStrength = (preset.curveStrength + delta * 0.05).coerceIn(0.5, 3.0)
+            "saturation" -> preset.saturationMultiplier = (preset.saturationMultiplier + delta * 0.05).coerceIn(0.0, 2.0)
+            "contrast" -> preset.contrastValue = (preset.contrastValue + delta * 2).coerceIn(-100, 100)
+            "warmth" -> preset.warmthValue = (preset.warmthValue + delta * 2).coerceIn(-100, 100)
+        }
+        updateOledMenu()
+        reprocessAndShow()
+    }
+
     // Re-runs processing on the already-captured in-memory image —
     // called every time mode or intensity changes, no re-capture needed
     private fun reprocessAndShow() {
         val srcMat = capturedMat ?: return
-        val params = presetParams[currentMode] ?: ProcessingParams()
+        val params = getParamsForPreset(currentMode) ?: ProcessingParams()
 
         CoroutineScope(Dispatchers.Default).launch {
             val resultMat = applyProcessing(srcMat, params)
@@ -310,10 +359,15 @@ class MainActivity : AppCompatActivity() {
         var warmthValue: Int = 0
     )
 
-    private val presetParams = mutableMapOf(
-        "moody" to ProcessingParams(curveStrength = 1.8, saturationMultiplier = 0.7),
-        "colorful" to ProcessingParams(saturationMultiplier = 1.6)
-    )
+    private fun getParamsForPreset(name: String): ProcessingParams {
+        val preset = presetList.find { it.name == name } ?: return ProcessingParams()
+        return ProcessingParams(
+            curveStrength = preset.curveStrength,
+            saturationMultiplier = preset.saturationMultiplier,
+            contrastValue = preset.contrastValue,
+            warmthValue = preset.warmthValue
+        )
+    }
 
     private fun updateOledMenu() {
         val text = when (menuMode) {
@@ -323,14 +377,14 @@ class MainActivity : AppCompatActivity() {
                 }.joinToString("\n")
             }
             MenuMode.TUNING_PARAMETERS -> {
-                val params = presetParams[presetNames[highlightedPresetIndex]] ?: ProcessingParams()
+                val preset = presetList.find { it.name == presetNames[highlightedPresetIndex] } ?: return
                 parameterNames.mapIndexed { index, name ->
                     val value = when (name) {
-                        "curve" -> params.curveStrength
-                        "saturation" -> params.saturationMultiplier
-                        "contrast" -> params.contrastValue
-                        "warmth" -> params.warmthValue
-                        else -> 0
+                        "curve" -> String.format("%.2f", preset.curveStrength)
+                        "saturation" -> String.format("%.2f", preset.saturationMultiplier)
+                        "contrast" -> preset.contrastValue.toString()
+                        "warmth" -> preset.warmthValue.toString()
+                        else -> "0"
                     }
                     val label = "$name: $value"
                     if (index == highlightedParameterIndex) "> $label" else "  $label"
